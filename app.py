@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
         CREATE TABLE IF NOT EXISTS notes
         (id INTEGER PRIMARY KEY AUTOINCREMENT,
          note TEXT NOT NULL,
-         timestamp DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW', 'UTC')))
+         timestamp INTEGER)
     ''')
     db_conn.commit()
     yield
@@ -80,34 +80,42 @@ def get_formatted_notes():
     rows = c.fetchall()
     formatted_notes = []
     now = datetime.datetime.now(datetime.UTC)
-    for note, timestamp in rows:
-        note_time = datetime.datetime.fromisoformat(timestamp).replace(tzinfo=datetime.UTC)
-        time_ago = humanize.naturaltime(now - note_time)
+    for note, epoch_timestamp in rows:
+        note_time = datetime.datetime.fromtimestamp(epoch_timestamp, datetime.UTC)
+        time_diff = now - note_time
+        time_ago = humanize.naturaltime(time_diff)
         formatted_notes.append(f"{time_ago}: {note}")
     return "\n".join(formatted_notes)
 
 async def get_opening_instructions():
     try:
         notes = get_formatted_notes()
+        if not notes:
+            return read_file("instructions/opening_fresh.txt")
+
         messages = [
             {
                 "role": "system",
                 "content": read_file("instructions/editor.txt")
-            },
-            {
-                "role": "user",
-                "content": f"{notes}\nWrite brief, friendly instructions for starting a new interview."
             }
         ]
+        messages.append({
+            "role": "user",
+            "content": f"Previous interview notes:\n\n\"\"\"\n{notes}\n\"\"\""
+        })
+        messages.append({
+            "role": "user",
+            "content": read_file("instructions/opening_notes.txt")
+        })
+
         write_debug_messages(messages, "editor")
-        
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             max_tokens=200,
             temperature=0.7
         )
-        return response.choices[0].message.content
+        return f"<editor>{response.choices[0].message.content}</editor>"
     except Exception as e:
         logger.error(f"Error getting opening instructions: {e}")
         return "Instruction loading failed, please mention that the system is degraded."
@@ -142,9 +150,10 @@ async def get_session():
 async def create_note(note: Note):
     try:
         c = db_conn.cursor()
-        c.execute('INSERT INTO notes (note) VALUES (?)', (note.note,))
+        current_time = int(datetime.datetime.now(datetime.UTC).timestamp())
+        c.execute('INSERT INTO notes (note, timestamp) VALUES (?, ?)', (note.note, current_time))
         db_conn.commit()
-        return {"status": "success", "message": "Note saved"}
+        return {"status": "success", "feedback": "<editor>Change topics</editor>"}
     except Exception as e:
         logger.error(f"Error saving note: {e}")
         raise HTTPException(status_code=500, detail="Error saving note")
@@ -163,7 +172,7 @@ def read_file(file_path):
         return f"CRITICAL FILE IS MISSING: {file_path}, please mention this!!"
 
 if __name__ == "__main__":
-    logger.info(f"Starting server on port {args.port} with database {args.db}")
+    logger.debug(f"Starting server on port {args.port} with database {args.db}")
     uvicorn_log_config = uvicorn.config.LOGGING_CONFIG
     uvicorn_log_config["loggers"]["uvicorn"]["level"] = "INFO"
     uvicorn.run(

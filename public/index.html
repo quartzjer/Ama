@@ -88,6 +88,7 @@
                 instructions = await response.json();
                 toggleButton.textContent = 'Connect';
                 toggleButton.disabled = false;
+                console.log('Instructions loaded', instructions);
             } catch (error) {
                 displaySystemMessage('Failed to fetch instructions. Please reload the page.');
                 console.error('Error fetching instructions:', error);
@@ -185,7 +186,25 @@
                     },
                     voice: "shimmer",
                     temperature: 0.7,
-                    max_response_output_tokens: 500
+                    max_response_output_tokens: 500,
+                    tools: [
+                        {
+                            type: "function",
+                            name: "save_note",
+                            description: "After every exchange you must save a note so we can track progress",
+                            parameters: {
+                                type: "object",
+                                properties: {
+                                    note: {
+                                        type: "string",
+                                        description: "Capture what was just shared with you"
+                                    }
+                                },
+                                required: ["note"]
+                            }
+                        }
+                    ],
+                    tool_choice: "auto"
                 }
             };
             console.log('Starting session:', sessionUpdate);
@@ -198,6 +217,33 @@
                 }
             };
             dataChannel.send(JSON.stringify(getStarted));
+        }
+
+        async function handleFunctionCall(output) {
+            const functionCall = output.find(item => item.type === 'function_call');
+            if (!functionCall) return;
+
+            if (functionCall.name === 'save_note') {
+                console.log('Function call args:', functionCall.arguments);
+                const args = JSON.parse(functionCall.arguments);
+                console.log('Saving note:', args.note);
+                const result = await saveNote(args.note);
+                console.log('Note result:', result);
+                
+                const functionOutput = {
+                    type: "conversation.item.create",
+                    item: {
+                        type: "function_call_output",
+                        call_id: functionCall.call_id,
+                        output: JSON.stringify(result)
+                    }
+                };
+                dataChannel.send(JSON.stringify(functionOutput));
+                
+                dataChannel.send(JSON.stringify({
+                    type: "response.create"
+                }));
+            }
         }
 
         function handleMessage(data) {
@@ -213,6 +259,12 @@
                 case 'error':
                     console.error('Error:', data);
                     displaySystemMessage(`Error: ${data.error.message}`);
+                    break;
+
+                case 'response.done':
+                    if (data.response?.output) {
+                        handleFunctionCall(data.response.output);
+                    }
                     break;
 
                 // Ignore these known event types
@@ -233,7 +285,8 @@
                 case 'response.created':
                 case 'response.text.delta':
                 case 'response.text.done':
-                case 'response.done':
+                case 'response.function_call_arguments.delta':
+                case 'response.function_call_arguments.done':
                     break;
 
                 default:
