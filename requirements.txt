@@ -1,6 +1,7 @@
-fastapi>=0.115.4
-python-dotenv>=1.0.1
-uvicorn>=0.32.0
-websockets>=13.1
-gunicorn>=23.0.0
-aiohttp>=3.11.11
+fastapi
+python-dotenv
+uvicorn
+websockets
+gunicorn
+aiohttp
+openai

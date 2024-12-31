@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from dotenv import load_dotenv
 import uvicorn
 import aiohttp
+from openai import OpenAI
 
 parser = argparse.ArgumentParser(description='Ama Nuensis server')
 parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
@@ -21,7 +22,11 @@ def configure_logging(verbose):
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+if not OPENAI_API_KEY:
+    logging.error("OPENAI_API_KEY is not set in the environment or .env file")
+    exit(1)
 
+client = OpenAI()
 app = FastAPI()
 
 @app.get("/")
@@ -29,10 +34,33 @@ async def get():
     with open("public/index.html", "r") as f:
         return HTMLResponse(f.read())
 
+async def get_opening_instructions():
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": read_file("instructions/editor.txt")
+                },
+                {
+                    "role": "user",
+                    "content": "Write brief, friendly instructions for starting a new interview."
+                }
+            ],
+            max_tokens=200,
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Error getting opening instructions: {e}")
+        return "Instruction loading failed, please mention that the system is degraded."
+
 @app.get("/instructions")
 async def get_instructions():
     instructions = {
-        "voice": read_file("instructions/voice.txt")
+        "voice": read_file("instructions/voice.txt"),
+        "opening": await get_opening_instructions()
     }
     return instructions
 

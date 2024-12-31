@@ -58,7 +58,7 @@
 </head>
 <body>
     <h1>Ama</h1>
-    <button id="toggleButton">Connect</button>
+    <button id="toggleButton" disabled>Loading</button>
 
     <div id="transcript"></div>
 
@@ -86,8 +86,10 @@
                 const response = await fetch('/instructions');
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 instructions = await response.json();
+                toggleButton.textContent = 'Connect';
+                toggleButton.disabled = false;
             } catch (error) {
-                displaySystemMessage('Failed to fetch instructions. Using defaults.');
+                displaySystemMessage('Failed to fetch instructions. Please reload the page.');
                 console.error('Error fetching instructions:', error);
             }
         }
@@ -196,6 +198,7 @@
             const getStarted = {
                 type: "response.create",
                 response: {
+                    instructions: instructions.opening,
                     modalities: ["text", "audio"]
                 }
             };
@@ -275,12 +278,12 @@
 
         window.addEventListener('beforeunload', disconnect);
 
-        // Request microphone permission on page load
         window.onload = async () => {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 stream.getTracks().forEach(track => track.stop());
                 console.log('Microphone permission granted');
+                await fetchInstructions();
             } catch (err) {
                 console.error('Error accessing microphone:', err);
                 displaySystemMessage('Error accessing microphone. Please allow microphone access and reload the page.');
