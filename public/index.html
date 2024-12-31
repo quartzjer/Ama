@@ -262,6 +262,23 @@
             toggleButton.disabled = false;
         }
 
+        async function saveNote(note) {
+            try {
+                const response = await fetch('/notes', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ note }),
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                return await response.json();
+            } catch (error) {
+                console.error('Error saving note:', error);
+                displaySystemMessage('Failed to save note to server.');
+            }
+        }
+
         toggleButton.onclick = async () => {
             if (peerConnection) {
                 disconnect();
