@@ -87,42 +87,8 @@ def get_formatted_notes():
         formatted_notes.append(f"{time_ago}: {note}")
     return "\n".join(formatted_notes)
 
-async def get_opening_instructions():
+async def get_editor_response(prompt, notes="", max_tokens=64):
     try:
-        notes = get_formatted_notes()
-        if not notes:
-            return read_file("instructions/opening_fresh.txt")
-
-        messages = [
-            {
-                "role": "system",
-                "content": read_file("instructions/editor.txt")
-            }
-        ]
-        messages.append({
-            "role": "user",
-            "content": f"Previous interview notes:\n\n\"\"\"\n{notes}\n\"\"\""
-        })
-        messages.append({
-            "role": "user",
-            "content": read_file("instructions/opening_notes.txt")
-        })
-
-        write_debug_messages(messages, "editor")
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=128,
-            temperature=0.7
-        )
-        return f"<editor>{response.choices[0].message.content}</editor>"
-    except Exception as e:
-        logger.error(f"Error getting opening instructions: {e}")
-        return "Instruction loading failed, please mention that the system is degraded."
-
-async def get_feedback():
-    try:
-        notes = get_formatted_notes()
         messages = [
             {
                 "role": "system",
@@ -134,7 +100,7 @@ async def get_feedback():
             },
             {
                 "role": "user",
-                "content": "Based on the notes so far, what quick feedback would you give to the interviewer?"
+                "content": prompt
             }
         ]
 
@@ -142,13 +108,25 @@ async def get_feedback():
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=64,
+            max_tokens=max_tokens,
             temperature=0.7
         )
         return f"<editor>{response.choices[0].message.content}</editor>"
     except Exception as e:
-        logger.error(f"Error getting feedback: {e}")
-        return "Feedback generation failed, please mention that the system is degraded."
+        logger.error(f"Error getting editor response: {e}")
+        return "Editor response failed, please mention that the system is degraded."
+
+async def get_opening_instructions():
+    notes = get_formatted_notes()
+    if not notes:
+        return read_file("instructions/opening_fresh.txt")
+    return await get_editor_response(read_file("instructions/opening_notes.txt"), notes=notes)
+
+async def get_feedback():
+    return await get_editor_response(
+        "Based on the notes so far, what quick feedback would you give to the interviewer?",
+        notes=get_formatted_notes()
+    )
 
 @app.get("/instructions")
 async def get_instructions():
