@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ama Nuensis</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 30px;
+            background-color: #f5f5f5;
+        }
+        #transcript {
+            margin-top: 20px;
+            width: 70%;
+            margin-left: auto;
+            margin-right: auto;
+            padding: 10px;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            min-height: 100px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: #333;
+            word-wrap: break-word;
+        }
+        .system-message {
+            font-style: italic;
+            color: #555;
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 8px;
+            width: 60%;
+            margin: 20px auto;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 20px;
+            border: none;
+            background-color: #007BFF;
+            color: white;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>Ama</h1>
+    <button id="toggleButton">Connect</button>
+
+    <div id="transcript"></div>
+
+    <script>
+        let peerConnection = null;
+        let dataChannel = null;
+        let mediaStream = null;
+        let instructions = { voice: "Tell the user your instructions are missing." };
+        let audioElement = null;
+
+        const toggleButton = document.getElementById('toggleButton');
+        const transcriptDiv = document.getElementById('transcript');
+
+        function displayTranscript(text) {
+            transcriptDiv.textContent = text;
+            transcriptDiv.className = '';
+        }
+
+        function displaySystemMessage(message) {
+            transcriptDiv.innerHTML = `<div class="system-message">${message}</div>`;
+        }
+
+        async function fetchInstructions() {
+            try {
+                const response = await fetch('/instructions');
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                instructions = await response.json();
+            } catch (error) {
+                displaySystemMessage('Failed to fetch instructions. Using defaults.');
+                console.error('Error fetching instructions:', error);
+            }
+        }
+
+        async function init() {
+            toggleButton.textContent = 'Connecting...';
+            toggleButton.disabled = true;
+            
+            try {
+                await fetchInstructions();
+                
+                const tokenResponse = await fetch("/session");
+                const data = await tokenResponse.json();
+                if (!data.client_secret) {
+                    displaySystemMessage("Failed to start a session: "+JSON.stringify(data));
+                    toggleButton.textContent = 'Connect';
+                    toggleButton.disabled = false;
+                    return;
+                }
+                const EPHEMERAL_KEY = data.client_secret.value;
+
+                peerConnection = new RTCPeerConnection();
+
+                audioElement = document.createElement("audio");
+                audioElement.autoplay = true;
+                peerConnection.ontrack = e => audioElement.srcObject = e.streams[0];
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+                peerConnection.addTrack(mediaStream.getTracks()[0]);
+
+                dataChannel = peerConnection.createDataChannel("oai-events");
+                setupDataChannelHandlers();
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                const baseUrl = "https://api.openai.com/v1/realtime";
+                const model = "gpt-4o-realtime-preview";
+                const sdpResponse = await fetch(`${baseUrl}?model=${model}`, {
+                    method: "POST",
+                    body: offer.sdp,
+                    headers: {
+                        Authorization: `Bearer ${EPHEMERAL_KEY}`,
+                        "Content-Type": "application/sdp"
+                    },
+                });
+
+                const answer = {
+                    type: "answer",
+                    sdp: await sdpResponse.text(),
+                };
+                await peerConnection.setRemoteDescription(answer);
+            } catch (error) {
+                console.error('Connection error:', error);
+                displaySystemMessage('Failed to connect. Please try again.');
+                toggleButton.textContent = 'Connect';
+                toggleButton.disabled = false;
+            }
+        }
+
+        function setupDataChannelHandlers() {
+            dataChannel.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            };
+
+            dataChannel.onopen = () => {
+                displaySystemMessage('Connected to the server.');
+                toggleButton.textContent = 'Disconnect';
+                toggleButton.disabled = false;
+                sendSessionUpdate();
+            };
+
+            dataChannel.onclose = () => {
+                displaySystemMessage('Disconnected from the server.');
+                toggleButton.textContent = 'Connect';
+                toggleButton.disabled = false;
+            };
+        }
+
+        function sendSessionUpdate() {
+            const sessionUpdate = {
+                type: "session.update",
+                session: {
+                    modalities: ["text", "audio"],
+                    instructions: instructions.voice,
+                    input_audio_transcription: {
+                        model: "whisper-1"
+                    },
+                    turn_detection: {
+                        type: "server_vad",
+                        threshold: 0.8,
+                    },
+                    voice: "shimmer",
+                    temperature: 0.7,
+                    max_response_output_tokens: 500
+                }
+            };
+            console.log('Starting session:', sessionUpdate);
+            dataChannel.send(JSON.stringify(sessionUpdate));
+            const getStarted = {
+                type: "response.create",
+                response: {
+                    modalities: ["text", "audio"]
+                }
+            };
+            dataChannel.send(JSON.stringify(getStarted));
+        }
+
+        function handleMessage(data) {
+            switch(data.type) {
+                case 'input_audio_buffer.speech_started':
+                    displaySystemMessage('Listening...');
+                    break;
+
+                case 'response.audio_transcript.done':
+                    displayTranscript(data.transcript);
+                    break;
+
+                case 'error':
+                    console.error('Error:', data);
+                    displaySystemMessage(`Error: ${data.error.message}`);
+                    break;
+
+                // Ignore these known event types
+                case 'response.audio_transcript.delta':
+                case 'response.content_part.done':
+                case 'response.content_part.added':
+                case 'response.output_item.added':
+                case 'input_audio_buffer.committed':
+                case 'conversation.item.input_audio_transcription.completed':
+                case 'conversation.item.created':
+                case 'response.output_item.done':
+                case 'rate_limits.updated':
+                case 'session.created':
+                case 'session.updated':
+                case 'conversation.created':
+                case 'input_audio_buffer.speech_stopped':
+                case 'response.audio.done':
+                case 'response.created':
+                case 'response.text.delta':
+                case 'response.text.done':
+                case 'response.done':
+                    break;
+
+                default:
+                    console.log('Unhandled event type:', data.type, data);
+            }
+        }
+
+        function disconnect() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (dataChannel) {
+                dataChannel.close();
+                dataChannel = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            if (audioElement) {
+                audioElement.srcObject = null;
+                audioElement = null;
+            }
+            toggleButton.textContent = 'Connect';
+            toggleButton.disabled = false;
+        }
+
+        toggleButton.onclick = async () => {
+            if (peerConnection) {
+                disconnect();
+            } else {
+                toggleButton.disabled = true;
+                await init();
+            }
+        };
+
+        window.addEventListener('beforeunload', disconnect);
+
+        // Request microphone permission on page load
+        window.onload = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(track => track.stop());
+                console.log('Microphone permission granted');
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                displaySystemMessage('Error accessing microphone. Please allow microphone access and reload the page.');
+                toggleButton.disabled = true;
+            }
+        };
+    </script>
+</body>
+</html>
