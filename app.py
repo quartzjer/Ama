@@ -112,13 +112,43 @@ async def get_opening_instructions():
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=200,
+            max_tokens=128,
             temperature=0.7
         )
         return f"<editor>{response.choices[0].message.content}</editor>"
     except Exception as e:
         logger.error(f"Error getting opening instructions: {e}")
         return "Instruction loading failed, please mention that the system is degraded."
+
+async def get_feedback():
+    try:
+        notes = get_formatted_notes()
+        messages = [
+            {
+                "role": "system",
+                "content": read_file("instructions/editor.txt")
+            },
+            {
+                "role": "user",
+                "content": f"Previous interview notes:\n\n\"\"\"\n{notes}\n\"\"\""
+            },
+            {
+                "role": "user",
+                "content": "Based on the notes so far, what quick feedback would you give to the interviewer?"
+            }
+        ]
+
+        write_debug_messages(messages, "editor")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            max_tokens=64,
+            temperature=0.7
+        )
+        return f"<editor>{response.choices[0].message.content}</editor>"
+    except Exception as e:
+        logger.error(f"Error getting feedback: {e}")
+        return "Feedback generation failed, please mention that the system is degraded."
 
 @app.get("/instructions")
 async def get_instructions():
@@ -153,7 +183,8 @@ async def create_note(note: Note):
         current_time = int(datetime.datetime.now(datetime.UTC).timestamp())
         c.execute('INSERT INTO notes (note, timestamp) VALUES (?, ?)', (note.note, current_time))
         db_conn.commit()
-        return {"status": "success", "feedback": "<editor>Change topics</editor>"}
+        feedback = await get_feedback()
+        return {"status": "success", "feedback": feedback}
     except Exception as e:
         logger.error(f"Error saving note: {e}")
         raise HTTPException(status_code=500, detail="Error saving note")
