@@ -1,24 +1,36 @@
 import os
 import argparse
 import logging
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from dotenv import load_dotenv
 import uvicorn
 import aiohttp
 from openai import OpenAI
+import sqlite3
+from pydantic import BaseModel
+import json
+import datetime
+import humanize
 
 parser = argparse.ArgumentParser(description='Ama Nuensis server')
 parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
 parser.add_argument('-p', '--port', type=int, default=8000, help='Port to run the server on')
+parser.add_argument('-d', '--db', type=str, default='./notes.db', help='Path to the SQLite database file')
+
+args = parser.parse_args()
 
 def configure_logging(verbose):
-    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        level=logging.INFO,
+        format='%(levelname)-8s  %(message)s'
     )
+    log = logging.getLogger('ama')
+    log.setLevel(logging.DEBUG if verbose else logging.INFO)
+    return log
+
+logger = configure_logging(args.verbose)
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
@@ -27,33 +39,77 @@ if not OPENAI_API_KEY:
     exit(1)
 
 client = OpenAI()
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db_conn
+    db_conn = sqlite3.connect(args.db, check_same_thread=False)
+    c = db_conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS notes
+        (id INTEGER PRIMARY KEY AUTOINCREMENT,
+         note TEXT NOT NULL,
+         timestamp DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW', 'UTC')))
+    ''')
+    db_conn.commit()
+    yield
+    if db_conn:
+        db_conn.close()
+
+app = FastAPI(lifespan=lifespan)
+db_conn = None
+
+class Note(BaseModel):
+    note: str
 
 @app.get("/")
 async def get():
     with open("public/index.html", "r") as f:
         return HTMLResponse(f.read())
 
+def write_debug_messages(messages, prefix):
+    if args.verbose:
+        debug_file = f"{prefix}_debug.json"
+        with open(debug_file, "w") as f:
+            json.dump(messages, f, indent=2)
+        logger.debug(f"Wrote debug messages to {debug_file}")
+
+def get_formatted_notes():
+    c = db_conn.cursor()
+    c.execute('SELECT note, timestamp FROM notes ORDER BY timestamp ASC')
+    rows = c.fetchall()
+    formatted_notes = []
+    now = datetime.datetime.now(datetime.UTC)
+    for note, timestamp in rows:
+        note_time = datetime.datetime.fromisoformat(timestamp).replace(tzinfo=datetime.UTC)
+        time_ago = humanize.naturaltime(now - note_time)
+        formatted_notes.append(f"{time_ago}: {note}")
+    return "\n".join(formatted_notes)
+
 async def get_opening_instructions():
     try:
+        notes = get_formatted_notes()
+        messages = [
+            {
+                "role": "system",
+                "content": read_file("instructions/editor.txt")
+            },
+            {
+                "role": "user",
+                "content": f"{notes}\nWrite brief, friendly instructions for starting a new interview."
+            }
+        ]
+        write_debug_messages(messages, "editor")
+        
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": read_file("instructions/editor.txt")
-                },
-                {
-                    "role": "user",
-                    "content": "Write brief, friendly instructions for starting a new interview."
-                }
-            ],
+            messages=messages,
             max_tokens=200,
             temperature=0.7
         )
         return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Error getting opening instructions: {e}")
+        logger.error(f"Error getting opening instructions: {e}")
         return "Instruction loading failed, please mention that the system is degraded."
 
 @app.get("/instructions")
@@ -66,7 +122,7 @@ async def get_instructions():
 
 @app.get("/session")
 async def get_session():
-    logging.debug("Requesting new session from OpenAI")
+    logger.debug("Requesting new session from OpenAI")
     async with aiohttp.ClientSession() as session:
         async with session.post(
             "https://api.openai.com/v1/realtime/sessions",
@@ -75,13 +131,23 @@ async def get_session():
                 "Content-Type": "application/json",
             },
             json={
-                "model": "gpt-4o-realtime-preview",
-                "voice": "ash",
+                "model": "gpt-4o-realtime-preview"
             }
         ) as response:
             data = await response.json()
-            logging.debug(f"Session response: {data}")
+            logger.debug(f"Session response: {data}")
             return JSONResponse(data)
+
+@app.post("/notes")
+async def create_note(note: Note):
+    try:
+        c = db_conn.cursor()
+        c.execute('INSERT INTO notes (note) VALUES (?)', (note.note,))
+        db_conn.commit()
+        return {"status": "success", "message": "Note saved"}
+    except Exception as e:
+        logger.error(f"Error saving note: {e}")
+        raise HTTPException(status_code=500, detail="Error saving note")
 
 @app.get("/favicon.ico")
 async def favicon():
@@ -93,11 +159,17 @@ def read_file(file_path):
             content = f.read().strip()
             return content
     except FileNotFoundError:
-        logging.error(f"Critical file missing: {file_path}")
+        logger.error(f"Critical file missing: {file_path}")
         return f"CRITICAL FILE IS MISSING: {file_path}, please mention this!!"
 
 if __name__ == "__main__":
-    args = parser.parse_args()
-    configure_logging(args.verbose)
-    logging.info(f"Starting server on port {args.port}")
-    uvicorn.run("app:app", host="0.0.0.0", port=args.port, reload=True, log_level="debug" if args.verbose else "info")
+    logger.info(f"Starting server on port {args.port} with database {args.db}")
+    uvicorn_log_config = uvicorn.config.LOGGING_CONFIG
+    uvicorn_log_config["loggers"]["uvicorn"]["level"] = "INFO"
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=args.port,
+        reload=True,
+        access_log=True
+    )

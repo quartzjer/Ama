@@ -94,13 +94,8 @@
             }
         }
 
-        async function init() {
-            toggleButton.textContent = 'Connecting...';
-            toggleButton.disabled = true;
-            
-            try {
-                await fetchInstructions();
-                
+        async function connect() {
+            try {                
                 const tokenResponse = await fetch("/session");
                 const data = await tokenResponse.json();
                 if (!data.client_secret) {
@@ -272,7 +267,7 @@
                 disconnect();
             } else {
                 toggleButton.disabled = true;
-                await init();
+                await connect();
             }
         };
 

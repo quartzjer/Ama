@@ -5,3 +5,4 @@ websockets
 gunicorn
 aiohttp
 openai
+humanize
